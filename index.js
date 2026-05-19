@@ -39,6 +39,9 @@ const commandHistory = new Map(); // user -> [timestamps]
 const exportHistory = new Map(); // user -> [timestamps]
 const userCooldowns = new Map(); // user -> lastCommandTime
 
+// QR generation counter (to avoid repeating full instructions on every refresh)
+let qrCount = 0;
+
 // Session lock to prevent concurrent modifications
 const sessionLocks = new Map(); // chatId -> lock status
 
@@ -127,10 +130,13 @@ function checkExportLimit(userId) {
 
 /**
  * Verify admin with additional checks
+ * Normalizes both numbers by stripping leading '+' before comparing
  */
 function isAdmin(senderNumber) {
   if (!isValidPhoneNumber(senderNumber)) return false;
-  return senderNumber === ADMIN_NUMBER;
+  const normalizedSender = senderNumber.replace(/^\+/, '');
+  const normalizedAdmin = ADMIN_NUMBER.replace(/^\+/, '');
+  return normalizedSender === normalizedAdmin;
 }
 
 /**
@@ -213,11 +219,17 @@ const client = new Client({
 // ========================================
 
 client.on('qr', (qr) => {
-  console.log('\n🔐 QR CODE GENERATED - Scan with WhatsApp:\n');
-  qrcode.generate(qr, { small: true });
-  console.log('\n📱 Raw QR string (for remote decode):\n', qr);
-  console.log('\n⚠️  Paste the above string at https://qrcode.tec-it.com to generate scannable QR\n');
-  console.log('🔒 Security: This QR code expires in 60 seconds and links YOUR WhatsApp only.\n');
+  qrCount++;
+  if (qrCount === 1) {
+    console.log('\n🔐 QR CODE GENERATED - Scan with WhatsApp:\n');
+    qrcode.generate(qr, { small: true });
+    console.log('\n📱 Raw QR string (for remote decode):\n', qr);
+    console.log('\n⚠️  Paste the above string at https://qrcode.tec-it.com to generate scannable QR\n');
+    console.log('🔒 Security: This QR code expires in 60 seconds and links YOUR WhatsApp only.\n');
+  } else {
+    console.log(`\n🔄 QR Code refreshed (attempt ${qrCount}) - scan quickly before it expires again\n`);
+    qrcode.generate(qr, { small: true });
+  }
 });
 
 client.on('ready', async () => {
@@ -251,13 +263,6 @@ client.on('ready', async () => {
       // console.log(`🚫 ${groups.length - activeCount} groups ignored\n`);
     }
     
-    // console.log('🛡️  Security features enabled:');
-    // console.log('   ✓ Rate limiting active');
-    // console.log('   ✓ Input sanitization');
-    // console.log('   ✓ Admin verification');
-    // console.log('   ✓ Command cooldowns');
-    // console.log('   ✓ Session locking\n');
-    
   } catch (error) {
     console.error('Error listing groups:', error.message);
   }
@@ -269,7 +274,6 @@ client.on('authenticated', () => {
 
 client.on('auth_failure', (msg) => {
   console.error('❌ Authentication failed Delete .wwebjs_auth folder and scan QR again:', msg);
-  // console.error('🔄 Delete .wwebjs_auth folder and scan QR again');
   process.exit(1);
 });
 
@@ -282,6 +286,7 @@ client.on('disconnected', (reason) => {
   commandHistory.clear();
   exportHistory.clear();
   userCooldowns.clear();
+  qrCount = 0;
   
   setTimeout(() => {
     client.initialize();
@@ -309,7 +314,7 @@ client.on('message', async (msg) => {
     }
     
     const contact = await msg.getContact();
-    const senderNumber = contact.number;
+    const senderNumber = contact.id.user;
     
     // Validate sender number
     if (!isValidPhoneNumber(senderNumber)) {
@@ -461,9 +466,9 @@ async function handleTotal(msg, chat, chatId) {
     
     let totalSum = 0;
     
-    entries.slice(0, 10).forEach(([number, data], index) => {
-      // const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
-      // leaderboard += `${medal} ${data.name}: *${data.count}*\n`;
+    entries.slice(0, 10).forEach(([, data], index) => {
+      const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+      leaderboard += `${medal} ${data.name}: *${data.count}*\n`;
       totalSum += data.count;
     });
     
@@ -491,84 +496,136 @@ async function handleExport(msg, chat, chatId, senderNumber) {
     // Admin verification
     if (!isAdmin(senderNumber)) {
       await msg.reply('❌ Only admin can export data.');
-      // console.warn(`⚠️  Unauthorized export attempt by ${hashForLog(senderNumber)} in ${chat.name}`);
       return;
     }
-    
+
     // Export rate limiting
     if (!checkExportLimit(senderNumber)) {
       await msg.reply('⏱️ Export limit reached. Please wait before exporting again.');
       return;
     }
-    
-    const db = loadDatabase(chatId);
-    const entries = Object.entries(db);
-    
-    if (entries.length === 0) {
+
+    // ── Collect data from ALL group database files ──────────────────────────
+    const allFiles = fs.readdirSync(DATA_DIR).filter(f => f.startsWith('counts_') && f.endsWith('.json'));
+
+    if (allFiles.length === 0) {
       return msg.reply('📊 No data to export.');
     }
-    
-    // Sort by count descending
-    entries.sort((a, b) => b[1].count - a[1].count);
-    
-    // Create Excel file with security checks
+
+    // Build a chatId → group name map from the live client
+    const groupNameMap = {};
+    try {
+      const chats = await client.getChats();
+      chats.filter(c => c.isGroup).forEach(c => {
+        groupNameMap[c.id._serialized] = c.name;
+      });
+    } catch (e) {
+      console.warn('⚠️  Could not fetch group names:', e.message);
+    }
+
+    // Derive chatId from filename: counts_<sanitized chatId>.json
+    // getDatabasePath sanitizes with replace(/[^a-zA-Z0-9@._-]/g, '_')
+    // We stored the sanitized form, so we match by scanning groupNameMap keys
+    function fileNameToChatId(fileName) {
+      const sanitized = fileName.replace('counts_', '').replace('.json', '');
+      // Try to find the original chatId whose sanitized form matches
+      const match = Object.keys(groupNameMap).find(id => id.replace(/[^a-zA-Z0-9@._-]/g, '_') === sanitized);
+      return match || sanitized;
+    }
+
+    // ── Build Excel rows ─────────────────────────────────────────────────────
     const worksheetData = [
-      ['Rank', 'Name', 'Phone Number', 'Count', 'Recorded At']
+      ['Group', 'Rank', 'Name', 'Phone Number', 'Count', 'Recorded At']
     ];
-    
-    entries.forEach(([number, data], index) => {
-      worksheetData.push([
-        index + 1,
-        data.name,
-        number,
-        data.count,
-        data.timestamp
-      ]);
-    });
-    
+
+    let grandTotal = 0;
+    let grandParticipants = 0;
+    let hasAnyData = false;
+    const groupSummaries = []; // for the WhatsApp text reply
+
+    for (const file of allFiles) {
+      const fileChatId = fileNameToChatId(file);
+      const groupName = groupNameMap[fileChatId] || fileChatId;
+      const db = loadDatabase(fileChatId);
+      const entries = Object.entries(db);
+
+      if (entries.length === 0) continue;
+      hasAnyData = true;
+
+      entries.sort((a, b) => b[1].count - a[1].count);
+
+      let groupTotal = 0;
+      entries.forEach(([number, data], index) => {
+        worksheetData.push([
+          groupName,
+          index + 1,
+          data.name,
+          number,
+          data.count,
+          data.timestamp
+        ]);
+        groupTotal += data.count;
+      });
+
+      // Group subtotal row
+      worksheetData.push(['', '', '', `── ${groupName} subtotal ──`, groupTotal, '']);
+
+      grandTotal += groupTotal;
+      grandParticipants += entries.length;
+      groupSummaries.push({ groupName, groupTotal, count: entries.length });
+    }
+
+    if (!hasAnyData) {
+      return msg.reply('📊 No data to export across any group.');
+    }
+
+    // Grand total row
+    worksheetData.push(['', '', '', '══ GRAND TOTAL ══', grandTotal, '']);
+
+    // ── Write Excel ──────────────────────────────────────────────────────────
     const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+
+    // Bold the header row and total rows (basic column widths)
+    worksheet['!cols'] = [
+      { wch: 25 }, // Group
+      { wch: 6 },  // Rank
+      { wch: 20 }, // Name
+      { wch: 18 }, // Phone
+      { wch: 8 },  // Count
+      { wch: 26 }, // Recorded At
+    ];
+
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Counts');
-    
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'All Groups');
+
     const timestamp = Date.now();
-    const fileName = `export_${hashForLog(chatId)}_${timestamp}.xlsx`;
+    const fileName = `export_all_${timestamp}.xlsx`;
     const filePath = path.join(DATA_DIR, fileName);
-    
-    // Validate file path
+
     if (!isValidFilePath(filePath)) {
       throw new Error('Invalid file path detected');
     }
-    
+
     XLSX.writeFile(workbook, filePath);
-    
-    // Set secure file permissions
     try {
       fs.chmodSync(filePath, 0o600);
-    } catch (error) {
+    } catch (e) {
       console.warn('⚠️  Could not set file permissions');
     }
-    
-    // Send text summary
-    let summary = `📤 *Export for ${chat.name}*\n\n`;
-    let totalSum = 0;
-    
-    entries.slice(0, 20).forEach(([number, data], index) => {
-      summary += `${index + 1}. ${data.name}: ${data.count}\n`;
-      totalSum += data.count;
+
+    // ── WhatsApp text summary ────────────────────────────────────────────────
+    let summary = `📤 *Full Export — All Groups*\n\n`;
+    groupSummaries.forEach(({ groupName, groupTotal, count }) => {
+      summary += `📌 *${groupName}*\n`;
+      summary += `   👥 Participants: ${count}  |  🎯 Total: ${groupTotal}\n\n`;
     });
-    
-    if (entries.length > 20) {
-      summary += `\n_... and ${entries.length - 20} more (see Excel file)_\n`;
-      entries.slice(20).forEach(([, data]) => {
-        totalSum += data.count;
-      });
-    }
-    
-    summary += `\n🎯 Total: ${totalSum}`;
-    
+    summary += `━━━━━━━━━━━━━━━━\n`;
+    summary += `🏆 *Grand Total: ${grandTotal}*\n`;
+    summary += `👥 *Total Participants: ${grandParticipants}*`;
+
     await msg.reply(summary);
-    
-    // Send Excel file
+
+    // ── Send Excel file ──────────────────────────────────────────────────────
     const { MessageMedia } = require('whatsapp-web.js');
     const fileData = fs.readFileSync(filePath, { encoding: 'base64' });
     const mediaFile = new MessageMedia(
@@ -576,18 +633,17 @@ async function handleExport(msg, chat, chatId, senderNumber) {
       fileData,
       fileName
     );
-    
-    await chat.sendMessage(mediaFile, { 
-      caption: '📊 Excel export attached\n🔒 This file contains sensitive data - handle securely' 
+
+    await chat.sendMessage(mediaFile, {
+      caption: ''
     });
-    
-    // Secure cleanup - overwrite before deletion
+
+    // Secure cleanup
     const randomData = crypto.randomBytes(fs.statSync(filePath).size);
     fs.writeFileSync(filePath, randomData);
     fs.unlinkSync(filePath);
-    
+
     console.log(`📤 Export completed by admin in ${chat.name}`);
-    
   } catch (error) {
     throw error;
   }
@@ -597,49 +653,25 @@ async function handleReset(msg, chat, chatId, senderNumber) {
   try {
     // Admin verification
     if (!isAdmin(senderNumber)) {
-      // console.warn(`⚠️  Unauthorized reset attempt by ${hashForLog(senderNumber)} in ${chat.name}`);
+      await msg.reply('❌ Only admin can reset data.');
       return;
     }
-    
+
     await acquireLock(chatId);
-    
+
     try {
       const dbPath = getDatabasePath(chatId);
-      
+
       if (fs.existsSync(dbPath)) {
-        // Create encrypted backup
-        const backupTimestamp = Date.now();
-        const backupPath = path.join(DATA_DIR, `backup_${hashForLog(chatId)}_${backupTimestamp}.json`);
-        
-        // Validate backup path
-        if (!isValidFilePath(backupPath)) {
-          throw new Error('Invalid backup path');
-        }
-        
-        fs.copyFileSync(dbPath, backupPath);
-        
-        // Set secure permissions on backup
-        try {
-          fs.chmodSync(backupPath, 0o600);
-        } catch (error) {
-          console.warn('⚠️  Could not set backup file permissions');
-        }
-        
-        // Clear database
+        // Clear database — no backup
         saveDatabase(chatId, {});
-        
-        await msg.reply(`🗑️ All counts cleared!\n💾 Backup created\n🔒 Data securely archived`);
-        
-        console.log(`🗑️ Database reset by admin in ${chat.name}`);
-        
+        await msg.reply(`🗑️ All counts cleared!`);
       } else {
         await msg.reply('📊 No data to reset.');
       }
-      
     } finally {
       releaseLock(chatId);
     }
-    
   } catch (error) {
     releaseLock(chatId);
     throw error;
@@ -780,41 +812,11 @@ function saveDatabase(chatId, data) {
 // CLEANUP & STARTUP
 // ========================================
 
-// Cleanup old files on startup
-function cleanupOldFiles() {
-  try {
-    const files = fs.readdirSync(DATA_DIR);
-    const now = Date.now();
-    const thirtyDaysAgo = now - (30 * 24 * 60 * 60 * 1000);
-    
-    files.forEach(file => {
-      const filePath = path.join(DATA_DIR, file);
-      
-      if (!isValidFilePath(filePath)) return;
-      
-      // Only clean backup and export files (not active databases)
-      if (file.startsWith('backup_') || file.startsWith('export_')) {
-        const stats = fs.statSync(filePath);
-        
-        if (stats.mtimeMs < thirtyDaysAgo) {
-          fs.unlinkSync(filePath);
-          console.log(`🗑️  Cleaned up old file: ${file}`);
-        }
-      }
-    });
-  } catch (error) {
-    console.warn('⚠️  Error during cleanup:', error.message);
-  }
-}
-
 // ========================================
 // START THE BOT
 // ========================================
 
 console.log('🚀 WhatsApp Count Bot - Secure Edition');
-
-// Cleanup old files
-cleanupOldFiles();
 
 console.log('🌐 Initializing WhatsApp client...\n');
 client.initialize();
