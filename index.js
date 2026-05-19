@@ -14,7 +14,6 @@ require('dotenv').config();
 const ADMIN_NUMBER = process.env.ADMIN_NUMBER;
 if (!ADMIN_NUMBER || !/^\d{10,15}$/.test(ADMIN_NUMBER)) {
   console.error('❌ ERROR: ADMIN_NUMBER environment variable must be set and valid (10-15 digits)');
-  console.error('Example: export ADMIN_NUMBER="919876543210"');
   process.exit(1);
 }
 
@@ -108,7 +107,7 @@ function checkCooldown(userId) {
  */
 function checkExportLimit(userId) {
   const now = Date.now();
-  const oneHourAgo = now - 3600000;
+  const oneHourAgo = now - 360000;
   
   if (!exportHistory.has(userId)) {
     exportHistory.set(userId, []);
@@ -246,18 +245,18 @@ client.on('ready', async () => {
     
     if (ALLOWED_GROUPS.length === 0) {
       console.log('⚠️  WARNING: No group restrictions - bot will work in ALL groups!');
-      console.log('   Set ALLOWED_GROUPS environment variable to restrict access.\n');
+      // console.log('   Set ALLOWED_GROUPS environment variable to restrict access.\n');
     } else {
       console.log(`🔒 Bot active in ${activeCount} groups only`);
-      console.log(`🚫 ${groups.length - activeCount} groups ignored\n`);
+      // console.log(`🚫 ${groups.length - activeCount} groups ignored\n`);
     }
     
-    console.log('🛡️  Security features enabled:');
-    console.log('   ✓ Rate limiting active');
-    console.log('   ✓ Input sanitization');
-    console.log('   ✓ Admin verification');
-    console.log('   ✓ Command cooldowns');
-    console.log('   ✓ Session locking\n');
+    // console.log('🛡️  Security features enabled:');
+    // console.log('   ✓ Rate limiting active');
+    // console.log('   ✓ Input sanitization');
+    // console.log('   ✓ Admin verification');
+    // console.log('   ✓ Command cooldowns');
+    // console.log('   ✓ Session locking\n');
     
   } catch (error) {
     console.error('Error listing groups:', error.message);
@@ -269,8 +268,8 @@ client.on('authenticated', () => {
 });
 
 client.on('auth_failure', (msg) => {
-  console.error('❌ Authentication failed:', msg);
-  console.error('🔄 Delete .wwebjs_auth folder and scan QR again');
+  console.error('❌ Authentication failed Delete .wwebjs_auth folder and scan QR again:', msg);
+  // console.error('🔄 Delete .wwebjs_auth folder and scan QR again');
   process.exit(1);
 });
 
@@ -314,7 +313,7 @@ client.on('message', async (msg) => {
     
     // Validate sender number
     if (!isValidPhoneNumber(senderNumber)) {
-      console.warn(`⚠️  Invalid sender number format: ${hashForLog(senderNumber)}`);
+      // console.warn(`⚠️  Invalid sender number format: ${hashForLog(senderNumber)}`);
       return;
     }
     
@@ -325,8 +324,8 @@ client.on('message', async (msg) => {
     
     // Rate limiting check
     if (!checkRateLimit(senderNumber)) {
-      await msg.reply('⏱️ Too many commands. Please wait a minute before trying again.');
-      console.warn(`⚠️  Rate limit exceeded: ${hashForLog(senderNumber)} in group ${chat.name}`);
+      // await msg.reply('⏱️ Too many commands. Please wait a minute before trying again.');
+      // console.warn(`⚠️  Rate limit exceeded: ${hashForLog(senderNumber)} in group ${chat.name}`);
       return;
     }
     
@@ -338,6 +337,30 @@ client.on('message', async (msg) => {
     // Command routing
     if (messageBody.startsWith('!count ')) {
       await handleCount(msg, chat, senderNumber, messageBody);
+    } else if (/^\d+/.test(messageBody) && !/^!\w/.test(messageBody)) {
+      // Format: starts with number e.g. "10Dharmik", "10 Dharmik"
+      await handleCount(msg, chat, senderNumber, `!count ${messageBody.match(/^(\d+)/)[1]}`);
+    } else if (/\s\d+$/.test(messageBody) && !/^!\w/.test(messageBody)) {
+      // Format: ends with number e.g. "Dharmik 10"
+      await handleCount(msg, chat, senderNumber, `!count ${messageBody.match(/(\d+)$/)[1]}`);
+    } else if (/-\d+$/.test(messageBody) && !/^!\w/.test(messageBody)) {
+      // Format: ends with number e.g. "Dharmik-10"
+      const number = messageBody.match(/(\d+)$/)[1];
+      await handleCount(msg, chat, senderNumber, `!count ${number}`);
+    } else if (/^\d+-/.test(messageBody) && !/^!\w/.test(messageBody)) {
+      // Format: ends with number e.g. "10-Dharmik"
+      const number = messageBody.match(/^(\d+)/)[1];
+      await handleCount(msg, chat, senderNumber, `!count ${number}`);
+    } else if (/^\d+$/.test(messageBody)) {
+      // Format: plain number only e.g. "42"
+      await handleCount(msg, chat, senderNumber, `!count ${messageBody}`);
+    } else if (messageBody.includes('\n') && !/^!\w/.test(messageBody)) {
+      // Format: multiline e.g. "Dharmik\n10" or "10\nDharmik"
+      const lines = messageBody.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+      const numberLine = lines.find(l => /^\d+$/.test(l));
+      if (numberLine) {
+        await handleCount(msg, chat, senderNumber, `!count ${numberLine}`);
+      }
     } else if (messageBody === '!total') {
       await handleTotal(msg, chat, chatId);
     } else if (messageBody === '!export') {
@@ -359,7 +382,7 @@ client.on('message', async (msg) => {
     }
     
     try {
-      await msg.reply('❌ An error occurred. Please try again later.');
+      // await msg.reply('❌ An error occurred. Please try again later.');
     } catch (replyError) {
       console.error('Failed to send error message:', replyError.message);
     }
@@ -378,14 +401,16 @@ async function handleCount(msg, chat, senderNumber, messageBody) {
     const countMatch = messageBody.match(/!count\s+(\d+)/);
     
     if (!countMatch) {
-      return msg.reply('❌ Invalid format. Use: !count <number>\nExample: !count 5');
+      return 0;
+      // msg.reply('❌ Invalid format. Use: !count <number>\nExample: !count 5');
     }
     
     const count = parseInt(countMatch[1], 10);
     
     // Validate count range
     if (isNaN(count) || count < RATE_LIMIT.minCountValue || count > RATE_LIMIT.maxCountValue) {
-      return msg.reply(`❌ Count must be between ${RATE_LIMIT.minCountValue} and ${RATE_LIMIT.maxCountValue}`);
+      return 0;
+      // msg.reply(`❌ Count must be between ${RATE_LIMIT.minCountValue} and ${RATE_LIMIT.maxCountValue}`);
     }
     
     // Acquire lock for atomic operation
@@ -405,7 +430,7 @@ async function handleCount(msg, chat, senderNumber, messageBody) {
       
       saveDatabase(chatId, db);
       
-      await msg.reply(`✅ Count recorded: ${count}\n📊 Use !total to see leaderboard`);
+      // await msg.reply(`✅ Count recorded: ${count}\n📊 Use !total to see leaderboard`);
       
       console.log(`📝 Count recorded: ${userName} (${hashForLog(senderNumber)}) = ${count} in ${chat.name}`);
       
@@ -437,8 +462,8 @@ async function handleTotal(msg, chat, chatId) {
     let totalSum = 0;
     
     entries.slice(0, 10).forEach(([number, data], index) => {
-      const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
-      leaderboard += `${medal} ${data.name}: *${data.count}*\n`;
+      // const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+      // leaderboard += `${medal} ${data.name}: *${data.count}*\n`;
       totalSum += data.count;
     });
     
@@ -466,13 +491,13 @@ async function handleExport(msg, chat, chatId, senderNumber) {
     // Admin verification
     if (!isAdmin(senderNumber)) {
       await msg.reply('❌ Only admin can export data.');
-      console.warn(`⚠️  Unauthorized export attempt by ${hashForLog(senderNumber)} in ${chat.name}`);
+      // console.warn(`⚠️  Unauthorized export attempt by ${hashForLog(senderNumber)} in ${chat.name}`);
       return;
     }
     
     // Export rate limiting
     if (!checkExportLimit(senderNumber)) {
-      await msg.reply('⏱️ Export limit reached. Please wait an hour before exporting again.');
+      await msg.reply('⏱️ Export limit reached. Please wait before exporting again.');
       return;
     }
     
@@ -572,8 +597,7 @@ async function handleReset(msg, chat, chatId, senderNumber) {
   try {
     // Admin verification
     if (!isAdmin(senderNumber)) {
-      await msg.reply('❌ Only admin can reset data.');
-      console.warn(`⚠️  Unauthorized reset attempt by ${hashForLog(senderNumber)} in ${chat.name}`);
+      // console.warn(`⚠️  Unauthorized reset attempt by ${hashForLog(senderNumber)} in ${chat.name}`);
       return;
     }
     
@@ -787,16 +811,7 @@ function cleanupOldFiles() {
 // START THE BOT
 // ========================================
 
-console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 console.log('🚀 WhatsApp Count Bot - Secure Edition');
-console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-console.log('🔒 Security checks...');
-console.log('   ✓ Admin authentication configured');
-console.log('   ✓ Rate limiting enabled');
-console.log('   ✓ Input sanitization active');
-console.log('   ✓ File permissions secured');
-console.log('   ✓ Path traversal protection enabled\n');
 
 // Cleanup old files
 cleanupOldFiles();
