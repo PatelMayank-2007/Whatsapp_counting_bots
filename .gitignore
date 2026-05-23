@@ -3,6 +3,3 @@ node_modules/
 .wwebjs_cache/
 data/*.json
 data/*.xlsx
-
-# env files (can opt-in for committing if needed)
-.env*

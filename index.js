@@ -1,3 +1,16 @@
+// Express Js Code Start
+const express = require("express");
+const app = express();
+
+app.get("/", (req, res) => {
+    res.send("Bot is running");
+});
+
+app.listen(process.env.PORT || 3000, () => {
+    console.log("Server started");
+});
+// Express Js Code End
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
